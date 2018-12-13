@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/beevik/etree"
 	"github.com/russellhaering/goxmldsig/etreeutils"
@@ -26,6 +27,7 @@ var (
 type ValidationContext struct {
 	CertificateStore X509CertificateStore
 	IdAttribute      string
+	AllowedClockSkew time.Duration
 	Clock            *Clock
 }
 
@@ -440,7 +442,7 @@ func (ctx *ValidationContext) verifyCertificate(sig *types.Signature) (*x509.Cer
 		return nil, errors.New("Could not verify certificate against trusted certs")
 	}
 
-	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+	if now.Before(cert.NotBefore.Add(-ctx.AllowedClockSkew)) || now.After(cert.NotAfter) {
 		return nil, errors.New("Cert is not valid at this time")
 	}
 

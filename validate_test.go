@@ -1,10 +1,14 @@
 package dsig
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"math/big"
 	"testing"
+	"time"
 
 	"github.com/beevik/etree"
 	"github.com/stretchr/testify/require"
@@ -202,4 +206,120 @@ func TestValidateWithEmptySignatureReference(t *testing.T) {
 	el, err := vc.Validate(doc.Root())
 	require.NoError(t, err)
 	require.NotEmpty(t, el)
+}
+
+func TestValidateWithClockSkew(t *testing.T) {
+	tcs := []struct {
+		name              string
+		actualClockSkew   time.Duration
+		allowedClockSkew  time.Duration
+		certificateExpiry time.Duration
+		check             func(t *testing.T, el *etree.Element, err error)
+	}{
+		{
+			name: "no skew, no allowed skew, signature should validate",
+			check: func(t *testing.T, el *etree.Element, err error) {
+				require.NoError(t, err)
+				require.NotEmpty(t, el)
+			},
+		},
+		{
+			name:             "no skew, some skew allowed, signature should validate",
+			allowedClockSkew: 30 * time.Second,
+			check: func(t *testing.T, el *etree.Element, err error) {
+				require.NoError(t, err)
+				require.NotEmpty(t, el)
+			},
+		},
+		{
+			name:             "clock skew inside allowable range, signature should validate",
+			actualClockSkew:  10 * time.Second,
+			allowedClockSkew: 30 * time.Second,
+			check: func(t *testing.T, el *etree.Element, err error) {
+				require.NoError(t, err)
+				require.NotEmpty(t, el)
+			},
+		},
+		{
+			name:             "clock skew outside allowable range, signature should not validate",
+			actualClockSkew:  60 * time.Second,
+			allowedClockSkew: 30 * time.Second,
+			check: func(t *testing.T, el *etree.Element, err error) {
+				require.EqualError(t, err, "Cert is not valid at this time")
+				require.Empty(t, el)
+			},
+		},
+		{
+			name:              "allowed skew should not affect certificate NotOnOrAfter evaluation",
+			certificateExpiry: -10 * time.Second,
+			allowedClockSkew:  30 * time.Second,
+			check: func(t *testing.T, el *etree.Element, err error) {
+				require.EqualError(t, err, "Cert is not valid at this time")
+				require.Empty(t, el)
+			},
+		},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := etree.NewDocument()
+			doc.ReadFromString(`<x ID="test"></x>`)
+
+			el := doc.Root()
+
+			now := time.Now()
+
+			expiry := 365 * 24 * time.Hour
+			if tc.certificateExpiry != 0 {
+				expiry = tc.certificateExpiry
+			}
+
+			ks := randomKeyStoreForTestWithValidityPeriod(now.Add(tc.actualClockSkew), now.Add(expiry))
+
+			signingContext := NewDefaultSigningContext(ks)
+
+			signedElement, _ := signingContext.SignEnveloped(el)
+
+			_, certBytes, _ := ks.GetKeyPair()
+			cert, _ := x509.ParseCertificate(certBytes)
+
+			cs := &MemoryX509CertificateStore{
+				Roots: []*x509.Certificate{cert},
+			}
+
+			vc := NewDefaultValidationContext(cs)
+			vc.AllowedClockSkew = tc.allowedClockSkew
+
+			el, err := vc.Validate(signedElement)
+
+			tc.check(t, el, err)
+		})
+	}
+}
+
+func randomKeyStoreForTestWithValidityPeriod(notBefore, notAfter time.Time) X509KeyStore {
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		panic(err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(0),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{},
+		BasicConstraintsValid: true,
+	}
+
+	cert, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+
+	return &MemoryX509KeyStore{
+		privateKey: key,
+		cert:       cert,
+	}
 }
